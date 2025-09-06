@@ -106,20 +106,6 @@ public class FocusEntity: Entity, HasModel, HasAnchoring {
     private func startTracking() {
         guard arView != nil else { return }
         
-        #if canImport(ARKit) && os(iOS)
-        NotificationCenter.default.publisher(for: ARSession.wasInterruptedNotification)
-            .sink { [weak self] _ in
-                self?.handleTrackingStateChange()
-            }
-            .store(in: &cancellables)
-        
-        NotificationCenter.default.publisher(for: ARSession.interruptionEndedNotification)
-            .sink { [weak self] _ in
-                self?.handleTrackingStateChange()
-            }
-            .store(in: &cancellables)
-        #endif
-        
         Timer.publish(every: 0.1, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] (_: Date) in
