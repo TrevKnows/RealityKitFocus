@@ -2,6 +2,10 @@ import RealityKit
 @preconcurrency import Combine
 import Foundation
 
+#if canImport(SwiftUI)
+import SwiftUI
+#endif
+
 #if canImport(ARKit)
 import ARKit
 #endif
@@ -13,6 +17,7 @@ import AppKit
 #endif
 
 @available(iOS 15.0, macOS 12.0, *)
+@MainActor
 public class FocusEntity: Entity, HasModel, HasAnchoring {
     
     public enum Style {
@@ -123,22 +128,46 @@ public class FocusEntity: Entity, HasModel, HasAnchoring {
         #if canImport(ARKit) && os(iOS)
         let screenCenter = CGPoint(x: arView.bounds.midX, y: arView.bounds.midY)
         
-        if let result = arView.raycast(from: screenCenter, allowing: .existingPlaneInfinite, alignment: .any).first {
-            let transform = Transform(matrix: result.worldTransform)
-            self.transform = transform
-            
-            updatePreviewPosition(transform)
-            
-            if currentState != .found {
-                setState(.found)
+        // Use modern ARRaycastQuery for better performance and LiDAR support
+        let query = arView.makeRaycastQuery(from: screenCenter,
+                                          allowing: .estimatedPlane,
+                                          alignment: .any)
+        
+        if let query = query {
+            let results = arView.session.raycast(query)
+            if let result = results.first {
+                let transform = Transform(matrix: result.worldTransform)
+                self.transform = transform
+                
+                updatePreviewPosition(transform)
+                
+                if currentState != .found {
+                    setState(.found)
+                }
+            } else {
+                if currentState == .found {
+                    setState(.tracking)
+                }
             }
         } else {
-            if currentState == .found {
-                setState(.tracking)
+            // Fallback to legacy raycast if ARRaycastQuery fails
+            if let result = arView.raycast(from: screenCenter, allowing: .existingPlaneInfinite, alignment: .any).first {
+                let transform = Transform(matrix: result.worldTransform)
+                self.transform = transform
+                
+                updatePreviewPosition(transform)
+                
+                if currentState != .found {
+                    setState(.found)
+                }
+            } else {
+                if currentState == .found {
+                    setState(.tracking)
+                }
             }
         }
         #else
-        // For macOS or other platforms without ARKit, just set to found state
+        // For macOS or other platforms without ARKit
         if currentState != .found {
             setState(.found)
         }
@@ -249,6 +278,7 @@ public class FocusEntity: Entity, HasModel, HasAnchoring {
     
     public func remove() {
         cancellables.removeAll()
+        modelPreview?.removeFromParent()
         arView?.scene.removeAnchor(self)
         removeFromParent()
     }
@@ -262,3 +292,55 @@ public class FocusEntity: Entity, HasModel, HasAnchoring {
         cancellables.removeAll()
     }
 }
+
+// MARK: - RealityView Support (iOS 18.0+, macOS 15.0+)
+#if canImport(SwiftUI)
+@available(iOS 18.0, macOS 15.0, *)
+public extension FocusEntity {
+    
+    /// Modern SwiftUI RealityView support
+    /// Use this initializer when working with RealityView's content parameter
+    convenience init(content: RealityViewCameraContent) {
+        self.init()
+        self.setupFocusEntityInternal()
+        content.add(self)
+        self.startBasicTracking()
+    }
+    
+    /// Internal setup method for RealityView initialization
+    private func setupFocusEntityInternal() {
+        anchoring = AnchoringComponent(.world(transform: matrix_identity_float4x4))
+        setupVisualStyleInternal()
+    }
+    
+    /// Internal visual style setup
+    private func setupVisualStyleInternal() {
+        let mesh = MeshResource.generatePlane(width: 0.15, depth: 0.15)
+        var material = UnlitMaterial(color: .systemBlue)
+        material.color = .init(tint: .systemBlue.withAlphaComponent(0.6))
+        model = ModelComponent(mesh: mesh, materials: [material])
+    }
+    
+    /// Basic tracking for RealityView (without ARKit integration)
+    private func startBasicTracking() {
+        // For RealityView, we simulate found state since we don't have direct ARView access
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            self.isEnabled = true
+        }
+    }
+}
+
+/*
+ Usage Example for RealityView:
+ 
+ struct ContentView: View {
+     var body: some View {
+         RealityView { content in
+             content.camera = .worldTracking
+             
+             let focusEntity = FocusEntity(content: content)
+         }
+     }
+ }
+ */
+#endif

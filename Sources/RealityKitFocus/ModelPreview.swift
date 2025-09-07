@@ -2,6 +2,7 @@ import RealityKit
 import Foundation
 
 @available(iOS 15.0, macOS 12.0, *)
+@MainActor
 public class ModelPreview: Entity, HasModel, HasAnchoring {
     
     private var originalModel: ModelEntity
@@ -67,9 +68,16 @@ public class ModelPreview: Entity, HasModel, HasAnchoring {
         }
     }
     
-    public func updatePreview(with newModel: ModelEntity) {
+    public func updatePreview(with newModel: ModelEntity) async {
         originalModel = newModel
         setupPreview()
+        
+        // Generate collision shapes for raycasting if needed
+        generateCollisionShapes(recursive: true)
+    }
+    
+    public func generateCollisionShapes() {
+        generateCollisionShapes(recursive: true)
     }
     
     public func setTransparency(_ level: Float) {

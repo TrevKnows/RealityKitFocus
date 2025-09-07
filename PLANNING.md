@@ -16,6 +16,7 @@ Create an improved focus entity system for RealityKit that enhances upon existin
 Main class for AR focus tracking and visualization.
 
 ```swift
+@MainActor
 public class FocusEntity: Entity, HasModel, HasAnchoring {
     public enum Style {
         case classic    // Traditional AR scanning box
@@ -30,6 +31,9 @@ public class FocusEntity: Entity, HasModel, HasAnchoring {
         case found
         case hidden
     }
+    
+    private var raycastQuery: ARRaycastQuery?
+    private var collisionComponent: CollisionComponent?
 }
 ```
 
@@ -37,12 +41,15 @@ public class FocusEntity: Entity, HasModel, HasAnchoring {
 Component for semi-transparent model visualization.
 
 ```swift
+@MainActor
 public class ModelPreview: Entity, HasModel {
     private var originalModel: ModelEntity
     private var transparencyLevel: Float = 0.5
+    private var previewMaterial: UnlitMaterial?
     
-    public func updatePreview(with model: ModelEntity)
+    public func updatePreview(with model: ModelEntity) async
     public func setTransparency(_ level: Float)
+    public func generateCollisionShapes() // For raycasting
 }
 ```
 
@@ -50,14 +57,19 @@ public class ModelPreview: Entity, HasModel {
 Handles placement validation and management.
 
 ```swift
+@MainActor
 public class PlacementManager {
     public struct PlacementResult {
         let position: SIMD3<Float>
         let normal: SIMD3<Float>
         let isValid: Bool
         let confidence: Float
+        let anchor: ARAnchor?
     }
     
+    private let arView: ARView
+    
+    public func performRaycast(from screenPoint: CGPoint) async -> [ARRaycastResult]
     public func validatePlacement(at position: SIMD3<Float>) -> PlacementResult
     public func snapToGrid(_ position: SIMD3<Float>) -> SIMD3<Float>
 }
@@ -66,19 +78,25 @@ public class PlacementManager {
 ### API Design
 
 #### Fluent API (Recommended)
-```swift
-let focusEntity = FocusEntity(on: arView)
-    .withStyle(.modern)
-    .enablePreview(for: modelEntity)
-    .setTransparency(0.6)
-    .enableGridSnapping(size: 0.1)
-    .onPlacement { [weak self] entity, position in
-        self?.placeModel(at: position)
-    }
-    .start()
 
-// Easy removal
-focusEntity.remove()
+**ARView (Legacy):**
+```swift
+let focusEntity = await FocusEntity(on: arView)
+    .withStyle(.modern)
+    .start()
+```
+
+**RealityView (Modern SwiftUI):**
+```swift
+RealityView { content in
+    content.camera = .worldTracking
+    
+    let focusEntity = await FocusEntity(on: content)
+        .withStyle(.modern)
+        .enablePreview(for: modelEntity)
+        .setTransparency(0.6)
+        .start()
+}
 ```
 
 #### Event-Driven API
@@ -123,9 +141,31 @@ focusEntity.onStateChange { state in
 ## Technical Specifications
 
 ### Dependencies
-- RealityKit (iOS 13.0+)
-- ARKit (for plane detection)
-- Swift 5.2+
+- RealityKit (iOS 15.0+, macOS 12.0+, visionOS 1.0+)
+- ARKit (for plane detection on iOS/iPadOS)
+- Swift 6.0+ with modern concurrency support
+
+### 2024 RealityKit Architecture Updates
+
+#### Entity-Component-System (ECS) Integration
+- Leverage RealityKit's ECS paradigm for better performance
+- Use HasAnchoring protocol requirement for scene integration
+- Implement proper entity hierarchy with AnchorEntity roots
+
+#### Modern Raycasting
+- Replace deprecated hit testing with ARRaycastQuery
+- Support LiDAR-enhanced raycasting on compatible devices
+- Use `.estimatedPlane` target for improved surface detection
+
+#### Cross-Platform Considerations
+- iOS/iPadOS: Full ARKit integration with plane detection
+- macOS: Limited functionality without ARKit (manual placement)  
+- visionOS: Enhanced spatial computing capabilities
+
+#### SwiftUI RealityView Integration (2024)
+- Support both ARView (legacy) and RealityView (modern SwiftUI)
+- RealityViewCameraContent for iOS/macOS, RealityViewContent for visionOS
+- Dual API design for backward compatibility
 
 ### Key Features
 
@@ -147,11 +187,14 @@ focusEntity.onStateChange { state in
 - Confidence scoring
 - Grid alignment options
 
-### Performance Considerations
-- Efficient entity pooling
-- Minimal draw calls for transparency
-- Optimized ray casting for placement
-- Memory management for large models
+### Performance Considerations (2024 Best Practices)
+- Entity hierarchy optimization (avoid deep nesting)
+- Polygon count limits: <250k for shared space, <500k for immersive
+- Use AnchorEntity for proper transform hierarchy
+- generateCollisionShapes() for raycasting performance
+- Material batching for transparency rendering
+- LiDAR-optimized raycasting on supported devices
+- Proper entity cleanup with removeFromParent()
 
 ## API Examples
 
@@ -159,6 +202,7 @@ focusEntity.onStateChange { state in
 ```swift
 import RealityKitFocus
 
+@MainActor
 class ARViewController: UIViewController {
     @IBOutlet var arView: ARView!
     private var focusEntity: FocusEntity?
@@ -166,9 +210,11 @@ class ARViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         
-        focusEntity = FocusEntity(on: arView)
-            .withStyle(.modern)
-            .start()
+        Task {
+            focusEntity = await FocusEntity(on: arView)
+                .withStyle(.modern)
+                .start()
+        }
     }
     
     @IBAction func toggleFocus(_ sender: UIButton) {
@@ -184,20 +230,25 @@ class ARViewController: UIViewController {
 
 ### Advanced Usage with Preview
 ```swift
-let modelEntity = try! ModelEntity.loadModel(named: "chair")
-
-focusEntity = FocusEntity(on: arView)
-    .withStyle(.classic)
-    .enablePreview(for: modelEntity)
-    .setTransparency(0.4)
-    .enableGridSnapping(size: 0.05)
-    .onPlacement { [weak self] entity, position in
-        self?.placeChair(at: position)
-    }
-    .onStateChange { state in
-        print("Focus state changed to: \(state)")
-    }
-    .start()
+do {
+    let modelEntity = try await ModelEntity(named: "chair")
+    
+    focusEntity = await FocusEntity(on: arView)
+        .withStyle(.classic)
+        .enablePreview(for: modelEntity)
+        .setTransparency(0.4)
+        .enableGridSnapping(size: 0.05)
+        .withRaycastTarget(.estimatedPlane)
+        .onPlacement { [weak self] entity, position, anchor in
+            await self?.placeChair(at: position, anchor: anchor)
+        }
+        .onStateChange { state in
+            print("Focus state changed to: \(state)")
+        }
+        .start()
+} catch {
+    print("Failed to load model: \(error)")
+}
 ```
 
 ## Testing Strategy
